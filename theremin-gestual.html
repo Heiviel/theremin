@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Theremin gestual</title>
+<style>
+  :root{
+    --bg:#0b0e12;
+    --ink:#e9e4d8;
+    --dim:#7e8794;
+    --amber:#e8b04b;
+    --cool:#5fa8c9;
+    --line:#1c222b;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;overflow:hidden;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  #stage{position:fixed;inset:0}
+  video,#gl{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  video{transform:scaleX(-1);filter:grayscale(1) brightness(.34) contrast(1.15)}
+  #gl{pointer-events:none}
+
+  #hud{position:absolute;top:0;left:0;right:0;padding:16px 18px;
+    display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
+  #note{font-size:56px;line-height:.9;font-weight:300;letter-spacing:-.03em;
+    font-variant-numeric:tabular-nums}
+  #note small{display:block;font-size:13px;letter-spacing:.06em;color:var(--dim);margin-top:8px;font-weight:400}
+  #state{text-align:right;font-size:12px;color:var(--dim);line-height:1.7;font-variant-numeric:tabular-nums}
+  #state b{color:var(--ink);font-weight:500}
+
+  #panel{position:absolute;left:0;right:0;bottom:0;padding:12px 14px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,rgba(11,14,18,.94),rgba(11,14,18,0));
+    display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .ctl{display:flex;flex-direction:column;gap:5px;min-width:78px}
+  .ctl span{font-size:10px;letter-spacing:.09em;color:var(--dim)}
+  select,input[type=range]{background:#141a21;color:var(--ink);border:1px solid var(--line);
+    border-radius:3px;padding:6px 7px;font-size:13px;font-family:inherit}
+  input[type=range]{padding:0;height:26px;accent-color:var(--amber);width:104px}
+  select:focus-visible,input:focus-visible,button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+
+  #start{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;
+    align-items:center;gap:22px;background:var(--bg);text-align:center;padding:24px;z-index:5}
+  #start h1{font-size:34px;font-weight:300;letter-spacing:-.02em;margin:0}
+  #start p{max-width:34ch;color:var(--dim);font-size:14px;line-height:1.6;margin:0}
+  #go{background:none;border:1px solid var(--amber);color:var(--amber);font:inherit;font-size:15px;
+    padding:14px 34px;border-radius:2px;cursor:pointer}
+  #go:active{background:var(--amber);color:#0b0e12}
+  #err{color:#d9705f;font-size:13px;max-width:34ch}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="gl"></canvas>
+
+  <div id="hud">
+    <div id="note">—<small>silencio</small></div>
+    <div id="state">
+      <div>manos <b id="nh">0</b></div>
+      <div><b id="fps">0</b> fps</div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <label class="ctl"><span>escala</span>
+      <select id="scale">
+        <option value="free">continua</option>
+        <option value="pentaMin" selected>pentatónica menor</option>
+        <option value="pentaMaj">pentatónica mayor</option>
+        <option value="major">mayor</option>
+        <option value="minor">menor</option>
+        <option value="dorian">dórica</option>
+        <option value="blues">blues</option>
+        <option value="whole">tonos enteros</option>
+        <option value="chrom">cromática</option>
+      </select>
+    </label>
+    <label class="ctl"><span>tónica</span>
+      <select id="root"></select>
+    </label>
+    <label class="ctl"><span>octavas</span>
+      <select id="oct">
+        <option>1</option><option selected>2</option><option>3</option><option>4</option>
+      </select>
+    </label>
+    <label class="ctl"><span>timbre</span>
+      <select id="tone">
+        <option value="sine" selected>theremin</option>
+        <option value="triangle">flauta</option>
+        <option value="sawtooth">cuerda</option>
+        <option value="square">hueco</option>
+      </select>
+    </label>
+    <label class="ctl"><span>glide</span><input id="glide" type="range" min="1" max="140" value="35"></label>
+    <label class="ctl"><span>reverb</span><input id="verb" type="range" min="0" max="100" value="38"></label>
+  </div>
+
+  <div id="start">
+    <h1>Theremin gestual</h1>
+    <p>Mano derecha: altura de la pantalla = nota, izquierda-derecha = brillo.
+       Mano izquierda: altura = volumen. Con una sola mano, junta los dedos para bajar el volumen.</p>
+    <button id="go">Encender cámara</button>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script type="module">
+import {HandLandmarker, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const V=document.getElementById('cam'), C=document.getElementById('gl'), X=C.getContext('2d');
+const elNote=document.getElementById('note'), elNh=document.getElementById('nh'), elFps=document.getElementById('fps');
+const elErr=document.getElementById('err');
+
+/* ---------- escalas ---------- */
+const NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SCALES={free:null,chrom:[0,1,2,3,4,5,6,7,8,9,10,11],major:[0,2,4,5,7,9,11],
+  minor:[0,2,3,5,7,8,10],dorian:[0,2,3,5,7,9,10],pentaMin:[0,3,5,7,10],
+  pentaMaj:[0,2,4,7,9],blues:[0,3,5,6,7,10],whole:[0,2,4,6,8,10]};
+const selRoot=document.getElementById('root');
+NAMES.forEach((n,i)=>{const o=document.createElement('option');o.value=i;o.textContent=n+((i<3)?'3':'2');selRoot.appendChild(o);});
+selRoot.value=9;
+const BASE_MIDI=45;
+
+let grid=[];
+function buildGrid(){
+  const s=SCALES[document.getElementById('scale').value];
+  const octs=+document.getElementById('oct').value;
+  const root=+selRoot.value;
+  grid=[];
+  if(!s){grid=null;return;}
+  for(let o=0;o<octs;o++) for(const st of s) grid.push(BASE_MIDI+root+o*12+st);
+  grid.push(BASE_MIDI+root+octs*12);
+}
+['scale','oct','root'].forEach(id=>document.getElementById(id).addEventListener('change',buildGrid));
+buildGrid();
+
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+function nameOf(m){const r=Math.round(m);return NAMES[((r%12)+12)%12]+(Math.floor(r/12)-1);}
+
+/* ---------- audio ---------- */
+let ac,osc1,osc2,vibOsc,vibGain,filt,amp,dry,wet,conv,ready=false;
+function initAudio(){
+  ac=new (window.AudioContext||window.webkitAudioContext)();
+  osc1=ac.createOscillator(); osc2=ac.createOscillator();
+  const g2=ac.createGain(); g2.gain.value=.18;
+  osc1.type='sine'; osc2.type='sine'; osc2.detune.value=7;
+  vibOsc=ac.createOscillator(); vibOsc.frequency.value=5.4;
+  vibGain=ac.createGain(); vibGain.gain.value=0;
+  vibOsc.connect(vibGain); vibGain.connect(osc1.detune); vibGain.connect(osc2.detune);
+  filt=ac.createBiquadFilter(); filt.type='lowpass'; filt.frequency.value=2000; filt.Q.value=1.2;
+  amp=ac.createGain(); amp.gain.value=0;
+  conv=ac.createConvolver(); conv.buffer=makeIR(2.4,2.6);
+  dry=ac.createGain(); wet=ac.createGain(); dry.gain.value=.7; wet.gain.value=.38;
+  osc1.connect(filt); osc2.connect(g2); g2.connect(filt);
+  filt.connect(amp);
+  amp.connect(dry); amp.connect(conv); conv.connect(wet);
+  dry.connect(ac.destination); wet.connect(ac.destination);
+  osc1.start(); osc2.start(); vibOsc.start();
+  ready=true;
+}
+function makeIR(sec,decay){
+  const n=Math.floor(ac.sampleRate*sec), b=ac.createBuffer(2,n,ac.sampleRate);
+  for(let c=0;c<2;c++){const d=b.getChannelData(c);
+    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/n,decay);}
+  return b;
+}
+document.getElementById('tone').addEventListener('change',e=>{
+  if(!ready)return; osc1.type=e.target.value;
+  osc2.type=(e.target.value==='sine')?'sine':'triangle';
+});
+document.getElementById('verb').addEventListener('input',e=>{
+  if(!ready)return; const v=e.target.value/100;
+  wet.gain.value=v; dry.gain.value=1-v*.45;
+});
+
+/* ---------- suavizado ---------- */
+const sm={pitch:.5,bright:.5,vol:0,vib:0};
+const ema=(cur,tgt,a)=>cur+(tgt-cur)*a;
+
+/* ---------- MediaPipe ---------- */
+let lm=null, lastTs=-1, fps=0, fAcc=0, fT=performance.now();
+const CONN=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+document.getElementById('go').addEventListener('click',async()=>{
+  const btn=document.getElementById('go'); btn.disabled=true; btn.textContent='Cargando…';
+  try{
+    initAudio(); await ac.resume();
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:960}},audio:false});
+    V.srcObject=stream; await V.play();
+    const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+    lm=await HandLandmarker.createFromOptions(fs,{
+      baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:"GPU"},
+      runningMode:"VIDEO",numHands:2,minHandDetectionConfidence:.5,minTrackingConfidence:.5});
+    document.getElementById('start').style.display='none';
+    resize(); loop();
+  }catch(e){
+    btn.disabled=false; btn.textContent='Reintentar';
+    elErr.textContent='No se pudo iniciar: '+e.message+'. Hace falta HTTPS y permiso de cámara.';
+  }
+});
+
+function resize(){const d=Math.min(devicePixelRatio||1,2);
+  C.width=innerWidth*d; C.height=innerHeight*d; X.setTransform(d,0,0,d,0,0);}
+addEventListener('resize',resize);
+
+/* ---------- bucle ---------- */
+function loop(){
+  requestAnimationFrame(loop);
+  if(V.readyState<2) return;
+  const ts=performance.now();
+  if(V.currentTime===lastTs) return;
+  lastTs=V.currentTime;
+
+  const res=lm.detectForVideo(V,ts);
+  fAcc++; if(ts-fT>500){fps=Math.round(fAcc*1000/(ts-fT));fAcc=0;fT=ts;elFps.textContent=fps;}
+
+  const hands=(res.landmarks||[]).map(h=>h.map(p=>({x:1-p.x,y:p.y})));
+  elNh.textContent=hands.length;
+  hands.sort((a,b)=>a[0].x-b[0].x);
+
+  let pitchH=null, volH=null;
+  if(hands.length>=2){ volH=hands[0]; pitchH=hands[hands.length-1]; }
+  else if(hands.length===1){ pitchH=hands[0]; }
+
+  let tVol=0,tPitch=sm.pitch,tBright=sm.bright,tVib=0;
+  if(pitchH){
+    const tip=pitchH[8];
+    tPitch=1-clamp(tip.y);
+    tBright=clamp(tip.x);
+    if(volH){
+      tVol=Math.pow(1-clamp(volH[8].y),1.4);
+      tVib=clamp((pinch(volH)-.25)*1.6);
+    }else{
+      tVol=Math.pow(clamp((pinch(pitchH)-.18)*1.5),1.3);
+    }
+  }
+  const a=.35;
+  sm.pitch=ema(sm.pitch,tPitch,a); sm.bright=ema(sm.bright,tBright,a);
+  sm.vol=ema(sm.vol,tVol,tVol<sm.vol?.5:.35); sm.vib=ema(sm.vib,tVib,.2);
+
+  /* nota */
+  let midi;
+  if(grid){ const i=Math.round(sm.pitch*(grid.length-1)); midi=grid[i]; }
+  else { const octs=+document.getElementById('oct').value;
+         midi=BASE_MIDI+ +selRoot.value + sm.pitch*octs*12; }
+
+  const glide=+document.getElementById('glide').value/1000;
+  const now=ac.currentTime;
+  osc1.frequency.setTargetAtTime(mtof(midi),now,glide);
+  osc2.frequency.setTargetAtTime(mtof(midi),now,glide);
+  filt.frequency.setTargetAtTime(300+sm.bright*sm.bright*7200,now,.05);
+  vibGain.gain.setTargetAtTime(sm.vib*42,now,.08);
+  amp.gain.setTargetAtTime(sm.vol*.32,now,.03);
+
+  elNote.firstChild.nodeValue = sm.vol>.02 ? nameOf(midi) : '—';
+  elNote.querySelector('small').textContent = sm.vol>.02
+    ? Math.round(mtof(midi))+' Hz · brillo '+Math.round(sm.bright*100)+'%'
+    : 'silencio';
+
+  draw(hands,pitchH,volH,midi);
+}
+const clamp=v=>Math.max(0,Math.min(1,v));
+function pinch(h){
+  const d=Math.hypot(h[4].x-h[8].x,h[4].y-h[8].y);
+  const s=Math.hypot(h[0].x-h[5].x,h[0].y-h[5].y)||.001;
+  return clamp(d/s/1.2);
+}
+
+/* ---------- dibujo ---------- */
+function draw(hands,pitchH,volH,midi){
+  const W=innerWidth,H=innerHeight;
+  X.clearRect(0,0,W,H);
+
+  if(grid){
+    X.lineWidth=1;
+    for(let i=0;i<grid.length;i++){
+      const y=H-(i/(grid.length-1))*H*.86-H*.07;
+      const on=Math.round(sm.pitch*(grid.length-1))===i;
+      X.strokeStyle=on?'rgba(232,176,75,.85)':'rgba(233,228,216,.10)';
+      X.beginPath(); X.moveTo(W*.5,y); X.lineTo(W-14,y); X.stroke();
+      if(on&&sm.vol>.02){X.fillStyle='rgba(232,176,75,.85)';X.font='11px Helvetica,Arial';
+        X.textAlign='right';X.fillText(nameOf(grid[i]),W-18,y-6);}
+    }
+  }
+
+  X.fillStyle='rgba(95,168,201,.16)'; X.fillRect(14,H*.07,7,H*.86);
+  X.fillStyle='rgba(95,168,201,.9)';
+  X.fillRect(14,H*.07+H*.86*(1-sm.vol),7,H*.86*sm.vol);
+
+  hands.forEach(h=>{
+    const c=(h===pitchH)?'232,176,75':'95,168,201';
+    X.strokeStyle='rgba('+c+',.45)'; X.lineWidth=2;
+    for(const[a,b]of CONN){X.beginPath();X.moveTo(h[a].x*W,h[a].y*H);X.lineTo(h[b].x*W,h[b].y*H);X.stroke();}
+    X.fillStyle='rgba('+c+',.9)';
+    for(const p of h){X.beginPath();X.arc(p.x*W,p.y*H,3,0,7);X.fill();}
+    const t=h[8];
+    X.strokeStyle='rgba('+c+',.9)'; X.lineWidth=1.5;
+    X.beginPath();X.arc(t.x*W,t.y*H,14+(h===pitchH?sm.vol*26:0),0,7);X.stroke();
+  });
+}
+</script>
+</body>
+</html>
